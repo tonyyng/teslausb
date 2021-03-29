@@ -1,21 +1,22 @@
 #!/bin/bash -eu
 
 function log_progress () {
-  if typeset -f setup_progress > /dev/null; then
-    setup_progress "verify-and-configure-archive: $@"
+  if declare -F setup_progress > /dev/null
+  then
+    setup_progress "verify-and-configure-archive: $*"
   fi
   echo "verify-and-configure-archive: $1"
 }
 
 function verify_configuration () {
-    log_progress "Verifying rlcone configuration..."
+    log_progress "Verifying rclone configuration..."
     if ! [ -e "/root/.config/rclone/rclone.conf" ]
     then
         log_progress "STOP: rclone config was not found. did you configure rclone correctly?"
         exit 1
     fi
 
-    if ! rclone lsd "$RCLONE_DRIVE": | grep -q "$RCLONE_PATH"
+    if ! rclone ls "$RCLONE_DRIVE:$RCLONE_PATH"
     then
         log_progress "STOP: Could not find the $RCLONE_DRIVE:$RCLONE_PATH"
         exit 1
@@ -26,9 +27,6 @@ verify_configuration
 
 function configure_archive () {
   log_progress "Configuring rclone archive..."
-
-  local config_file_path="/root/.teslaCamRcloneConfig"
-  /root/bin/write-archive-configs-to.sh "$config_file_path"
 
   # Ensure that /root/.config/rclone is a directory not a symlink
   if [ ! -L "/root/.config/rclone" ] && [ -d "/root/.config/rclone" ]

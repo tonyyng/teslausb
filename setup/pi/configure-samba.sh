@@ -1,7 +1,8 @@
 #!/bin/bash
 
 function log_progress () {
-  if typeset -f setup_progress > /dev/null; then
+  if declare -F setup_progress > /dev/null
+  then
     setup_progress "configure-samba: $1"
   fi
   echo "configure-samba: $1"
@@ -51,18 +52,21 @@ then
     ln -s /mutable/varlib/samba /var/lib/samba
   fi
 
-  # directory where the snapshots will be mounted and exported by samba
-  if [ ! -e /mnt/smbexport ]
-  then
-    mkdir /mnt/smbexport
-    echo "tmpfs /mnt/smbexport tmpfs nodev,nosuid 0 0" >> /etc/fstab
-  fi
-
   DEBIAN_FRONTEND=noninteractive apt-get -y --force-yes install samba
   service smbd start
   echo -e "raspberry\nraspberry\n" | smbpasswd -s -a pi
   service smbd stop
   log_progress "Done."
+fi
+
+# remove obsolete fstab entry
+sed -i '/^tmpfs \/mnt\/smbexport tmpfs nodev,nosuid 0 0$/d' /etc/fstab
+
+# move link folder from backingfiles to mutable if needed
+if [ ! -d /mutable/TeslaCam ] && [ -d /backingfiles/TeslaCam ]
+then
+  log_progress "Moving TeslaCam symlink folder from backingfiles to mutable"
+  mv /backingfiles/TeslaCam /mutable/TeslaCam
 fi
 
 # always update smb.conf in case we're updating a previous install
@@ -90,7 +94,7 @@ cat <<- EOF > /etc/samba/smb.conf
 	[TeslaCam]
 	   read only = yes
 	   locking = no
-	   path = /backingfiles/TeslaCam
+	   path = /mutable/TeslaCam
 	   guest ok = $GUEST_OK
 	   create mask = 0775
 	   veto files = /._*/.DS_Store/

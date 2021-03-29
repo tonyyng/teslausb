@@ -9,18 +9,32 @@ function check_variable () {
   fi
 }
 
+function check_supported_hardware () {
+  if grep -q 'Raspberry Pi Zero W' /sys/firmware/devicetree/base/model
+  then
+    return
+  fi
+  if grep -q 'Raspberry Pi 4' /sys/firmware/devicetree/base/model
+  then
+    return
+  fi
+  setup_progress "STOP: unsupported hardware: '$(cat /sys/firmware/devicetree/base/model)'"
+  setup_progress "(only Pi Zero W and Pi 4 have the necessary hardware to run teslausb)"
+  exit 1
+}
+
 function check_available_space () {
-    if [ -z "$usb_drive" ]
+    if [ -z "$USB_DRIVE" ]
     then
-      setup_progress "usb_drive is not set. SD card will be used."
+      setup_progress "USB_DRIVE is not set. SD card will be used."
       check_available_space_sd
     else
-      if [ "grep -q 'Pi 4' /sys/firmware/devicetree/base/model" ]
+      if grep -q 'Pi 4' /sys/firmware/devicetree/base/model
       then
-        setup_progress "usb_drive is set to $usb_drive. This will be used for /mutable and backingfiles."
+        setup_progress "USB_DRIVE is set to $USB_DRIVE. This will be used for /mutable and backingfiles."
         check_available_space_usb
       else
-        setup_progress "STOP: usb_drive is supported only on a Pi 4. Set usb_drive to blank or comment it to continue"
+        setup_progress "STOP: USB_DRIVE is supported only on a Pi 4. Set USB_DRIVE to blank or comment it to continue"
         exit 1
       fi
     fi
@@ -32,17 +46,21 @@ function check_available_space_sd () {
   # The following assumes that the root and boot partitions are adjacent at the start
   # of the disk, and that all the free space is at the end.
 
-  local totalsize=$(blockdev --getsize64 /dev/mmcblk0)
-  local part1size=$(blockdev --getsize64 /dev/mmcblk0p1)
-  local part2size=$(blockdev --getsize64 /dev/mmcblk0p2)
+  local totalsize
+  local part1size
+  local part2size
+  local available_space
 
-  local available_space=$(($totalsize - $part1size - $part2size))
+  totalsize=$(blockdev --getsize64 "${BOOT_DEVICE}")
+  part1size=$(blockdev --getsize64 "${BOOT_DEVICE_PART}1")
+  part2size=$(blockdev --getsize64 "${BOOT_DEVICE_PART}2")
+  available_space=$((totalsize - part1size - part2size))
 
   # Require at least 12 GB of available space.
   if [ "$available_space" -lt  $(( (1<<30) * 12)) ]
   then
     setup_progress "STOP: The MicroSD card is too small: $available_space bytes available."
-    setup_progress "$(parted /dev/mmcblk0 print)"
+    setup_progress "$(parted "${BOOT_DEVICE}" print)"
     exit 1
   fi
 
@@ -53,25 +71,27 @@ function check_available_space_usb () {
   setup_progress "Verifying that there is sufficient space available on the USB drive ..."
 
   # Verify that the disk has been provided and not a partition
-  local drive_type=$(lsblk -pno TYPE $usb_drive| head -n 1)
-  
+  local drive_type
+  drive_type=$(lsblk -pno TYPE "$USB_DRIVE" | head -n 1)
+
   if [ "$drive_type" != "disk" ]
   then
     setup_progress "STOP: The provided drive seems to be a partition. Please specify path to the disk."
     exit 1
   fi
 
-  # This verifies only the total size of the USB Drive. 
-  # All existing partitions on the drive will be erased if backingfiles are to be created or changed. 
-  # EXISTING DATA ON THE USB_DRIVE WILL BE REMOVED. 
+  # This verifies only the total size of the USB Drive.
+  # All existing partitions on the drive will be erased if backingfiles are to be created or changed.
+  # EXISTING DATA ON THE USB_DRIVE WILL BE REMOVED.
 
-  local drive_size=$(blockdev --getsize64 $usb_drive)
+  local drive_size
+  drive_size=$(blockdev --getsize64 "$USB_DRIVE")
 
-  # Require at least 16GB drive size. 
+  # Require at least 16GB drive size.
   if [ "$drive_size" -lt  $(( (1<<30) * 16)) ]
   then
-    setup_progress "STOP: The USB drive is too small: $(expr $drive_size / 1024 / 1024 / 1024)GB available. Expected at least 16GB"
-    setup_progress "$(parted $usb_drive print)"
+    setup_progress "STOP: The USB drive is too small: $(( drive_size / 1024 / 1024 / 1024 ))GB available. Expected at least 16GB"
+    setup_progress "$(parted "$USB_DRIVE" print)"
     exit 1
   fi
 
@@ -102,8 +122,10 @@ function check_setup_teslausb () {
   fi
 }
 
+check_supported_hardware
+
 check_setup_teslausb
 
-check_variable "camsize"
+check_variable "CAM_SIZE"
 
 check_available_space

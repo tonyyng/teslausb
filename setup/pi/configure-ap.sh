@@ -3,7 +3,8 @@
 # based on https://blog.thewalr.us/2017/09/26/raspberry-pi-zero-w-simultaneous-ap-and-managed-mode-wifi/
 
 function log_progress () {
-  if typeset -f setup_progress > /dev/null; then
+  if declare -F setup_progress > /dev/null
+  then
     setup_progress "configure-ap: $1"
   fi
   echo "configure-ap: $1"
@@ -15,16 +16,16 @@ then
   exit 1
 fi
 
-if [ -z "${AP_PASS+x}" ] || [ "$AP_PASS" = "password" ]
+if [ -z "${AP_PASS+x}" ] || [ "$AP_PASS" = "password" ] || (( ${#AP_PASS} < 8))
 then
-  log_progress "AP_PASS not set or not changed from default"
+  log_progress "AP_PASS not set, not changed from default, or too short"
   exit 1
 fi
 
 if ! grep -q id_str /etc/wpa_supplicant/wpa_supplicant.conf
 then
   IP=${AP_IP:-"192.168.66.1"}
-  NET=$(echo -n $IP | sed -e 's/\.[0-9]\{1,3\}$//')
+  NET=$(echo -n "$IP" | sed -e 's/\.[0-9]\{1,3\}$//')
 
   # install required packages
   log_progress "installing dnsmasq and hostapd"
@@ -46,6 +47,8 @@ then
 	bind-interfaces
 	bogus-priv
 	dhcp-range=${NET}.100,${NET}.150,12h
+	# don't configure a default route, we're not a router
+	dhcp-option=3
 	EOF
 
   # configure hostapd

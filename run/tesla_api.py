@@ -1,6 +1,9 @@
 #!/usr/bin/python3
 import argparse
+import base64
 import json
+import os
+import random
 import requests
 import time
 import sys
@@ -31,12 +34,13 @@ date_format = '%Y-%m-%d %H:%M:%S'
 tesla_api_json = {
     'access_token': '',
     'refresh_token': '',
+    'id': 0,
     'vehicle_id': 0,
     'token_created_at': datetime.strptime('1970-01-01 12:00:00', date_format)
 }
 
 
-def _execute_request(url, method=None, data=None, require_vehicle_online=True):
+def _execute_request(url=None, method=None, data=None, require_vehicle_online=True):
     """
     Wrapper around requests to the Tesla REST Service which ensures the vehicle is online before proceeding
     :param url: the url to send the request to
@@ -47,9 +51,9 @@ def _execute_request(url, method=None, data=None, require_vehicle_online=True):
     if require_vehicle_online:
         vehicle_online = False
         while not vehicle_online:
-            _log("Attempting to wake up Vehicle (ID:{})".format(tesla_api_json['vehicle_id']))
+            _log("Attempting to wake up Vehicle (ID:{})".format(tesla_api_json['id']))
             result = _rest_request(
-                '{}/{}/wake_up'.format(base_url, tesla_api_json['vehicle_id']),
+                '{}/{}/wake_up'.format(base_url, tesla_api_json['id']),
                 method='POST'
             )
 
@@ -61,10 +65,13 @@ def _execute_request(url, method=None, data=None, require_vehicle_online=True):
 
             vehicle_online = result['response']['state'] == "online"
             if vehicle_online:
-                _log("Vehicle (ID:{}) is Online".format(tesla_api_json['vehicle_id']))
+                _log("Vehicle (ID:{}) is Online".format(tesla_api_json['id']))
             else:
-                _log("Vehicle (ID:{}) is Asleep; Waiting 5 seconds before retry...".format(tesla_api_json['vehicle_id']))
+                _log("Vehicle (ID:{}) is Asleep; Waiting 5 seconds before retry...".format(tesla_api_json['id']))
                 time.sleep(5)
+
+    if url is None:
+        return result['response']['state']
 
     json_response = _rest_request(url, method, data)
 
@@ -215,24 +222,29 @@ def _refresh_api_token(refresh_token):
     _write_tesla_api_json()
 
 
-def _get_vehicle_id():
+def _get_id():
     """
-    Put the vehicle's ID into tesla_api_json['vehicle_id'].
+    Put the vehicle's ID into tesla_api_json['id'].
     """
-    # If it was already set by _load_tesla_api_json(), we're done.
-    if tesla_api_json['vehicle_id']:
+    # If it was already set by _load_tesla_api_json(), and a new
+    # VIN or name wasn't specified on the command line, we're done.
+    if tesla_api_json['id'] and tesla_api_json['vehicle_id']:
+      if SETTINGS['tesla_name'] == '' and SETTINGS['tesla_vin'] == '':
         return
 
-    # Call list_vehicles() and use the provided VIN to get the vehicle ID.
+    # Call list_vehicles() and use the provided name or VIN to get the vehicle ID.
     result = list_vehicles()
     for vehicle_dict in result['response']:
-        if vehicle_dict['vin'] == SETTINGS['tesla_vin']:
-            tesla_api_json['vehicle_id'] = vehicle_dict['id_s']
+        if ( vehicle_dict['vin'] == SETTINGS['tesla_vin']
+          or vehicle_dict['display_name'] == SETTINGS['tesla_name']
+          or ( SETTINGS['tesla_vin'] == '' and SETTINGS['tesla_name'] == '')):
+            tesla_api_json['id'] = vehicle_dict['id_s']
+            tesla_api_json['vehicle_id'] = vehicle_dict['vehicle_id']
             _log('Retrieved Vehicle ID from Tesla API.')
             _write_tesla_api_json()
             return
 
-    _error('Unable to retrieve vehicle ID: Unknown VIN. Cannot continue.')
+    _error('Unable to retrieve vehicle ID: Unknown name or VIN. Cannot continue.')
     sys.exit(1)
 
 
@@ -308,9 +320,33 @@ def list_vehicles():
     return _execute_request(base_url, None, None, False)
 
 
+def get_service_data():
+    return _execute_request(
+        '{}/{}/service_data'.format(base_url, tesla_api_json['id'])
+    )
+
+
+def get_vehicle_summary():
+    return _execute_request(
+        '{}/{}'.format(base_url, tesla_api_json['id'])
+    )
+
+
+def get_vehicle_legacy_data():
+    return _execute_request(
+        '{}/{}/data'.format(base_url, tesla_api_json['id'])
+    )
+
+
+def get_nearby_charging():
+    return _execute_request(
+        '{}/{}//nearby_charging_sites'.format(base_url, tesla_api_json['id'])
+    )
+
+
 def get_vehicle_data():
     return _execute_request(
-        '{}/{}/vehicle_data'.format(base_url, tesla_api_json['vehicle_id'])
+        '{}/{}/vehicle_data'.format(base_url, tesla_api_json['id'])
     )
 
 
@@ -324,31 +360,31 @@ def is_vehicle_online():
 
 def get_charge_state():
     return _execute_request(
-        '{}/{}/data_request/charge_state'.format(base_url, tesla_api_json['vehicle_id'])
+        '{}/{}/data_request/charge_state'.format(base_url, tesla_api_json['id'])
     )
 
 
 def get_climate_state():
     return _execute_request(
-        '{}/{}/data_request/climate_state'.format(base_url, tesla_api_json['vehicle_id'])
+        '{}/{}/data_request/climate_state'.format(base_url, tesla_api_json['id'])
     )
 
 
 def get_drive_state():
     return _execute_request(
-        '{}/{}/data_request/drive_state'.format(base_url, tesla_api_json['vehicle_id'])
+        '{}/{}/data_request/drive_state'.format(base_url, tesla_api_json['id'])
     )
 
 
 def get_gui_settings():
     return _execute_request(
-        '{}/{}/data_request/gui_settings'.format(base_url, tesla_api_json['vehicle_id'])
+        '{}/{}/data_request/gui_settings'.format(base_url, tesla_api_json['id'])
     )
 
 
 def get_vehicle_state():
     return _execute_request(
-        '{}/{}/data_request/vehicle_state'.format(base_url, tesla_api_json['vehicle_id'])
+        '{}/{}/data_request/vehicle_state'.format(base_url, tesla_api_json['id'])
     )
 
 
@@ -370,25 +406,71 @@ def is_sentry_mode_enabled():
     return data['response']['sentry_mode']
 
 
+'''
+This accesses the streaming endpoint, but doesn't
+stick around to wait for continuous results.
+'''
+def streaming_ping():
+    # the car needs to be awake for the streaming endpoint to work
+    wake_up_vehicle()
+
+    headers = {
+      'User-Agent': 'github.com/marcone/teslausb',
+      'Authorization': 'Bearer {}'.format(_get_api_token()),
+      'Connection': 'Upgrade',
+      'Upgrade': 'websocket',
+      'Sec-WebSocket-Key': base64.b64encode(bytes([random.randrange(0, 256) for _ in range(0, 13)])).decode('utf-8'),
+      'Sec-WebSocket-Version': '13',
+    }
+
+    url = 'https://streaming.vn.teslamotors.com/connect/{}'.format(tesla_api_json['vehicle_id'])
+
+    _log("Sending streaming request")
+    response = requests.get(url, headers=headers, stream=True)
+    if not response:
+        _error("Fatal Error: Tesla REST Service failed to return a response, access token may have expired")
+        sys.exit(1)
+
+    return response
+
+
 ######################################
 # API POST Functions
 ######################################
 def wake_up_vehicle():
     _log('Sending wakeup API command...')
-    result = _execute_request(
-        '{}/{}/wake_up'.format(base_url, tesla_api_json['vehicle_id']),
-        method='POST'
-    )
-    return result['response']['state']
+    return _execute_request()
 
 
 def set_charge_limit(percent):
     return _execute_request(
-        '{}/{}/command/set_charge_limit'.format(base_url, tesla_api_json['vehicle_id']),
+        '{}/{}/command/set_charge_limit'.format(base_url, tesla_api_json['id']),
         method='POST',
         data={'percent': percent}
     )
 
+def actuate_trunk():
+    result = _execute_request(
+        '{}/{}/command/actuate_trunk'.format(base_url, tesla_api_json['id']),
+        method='POST',
+        data={'which_trunk': 'rear'}
+    )
+    return result['response']['result']
+
+def actuate_frunk():
+    result = _execute_request(
+        '{}/{}/command/actuate_trunk'.format(base_url, tesla_api_json['id']),
+        method='POST',
+        data={'which_trunk': 'front'}
+    )
+    return result['response']['result']
+
+def flash_lights():
+    result = _execute_request(
+        '{}/{}/command/flash_lights'.format(base_url, tesla_api_json['id']),
+        method='POST'
+    )
+    return result['response']['result']
 
 def set_sentry_mode(enabled: bool):
     """
@@ -398,7 +480,7 @@ def set_sentry_mode(enabled: bool):
     """
     _log("Setting Sentry Mode Enabled: {}".format(enabled))
     result = _execute_request(
-        '{}/{}/command/set_sentry_mode'.format(base_url, tesla_api_json['vehicle_id']),
+        '{}/{}/command/set_sentry_mode'.format(base_url, tesla_api_json['id']),
         method='POST',
         data={'on': enabled}
     )
@@ -472,6 +554,30 @@ def _get_arg_parser():
         action="store_true",
         help="Print debug output."
     )
+    parser.add_argument(
+        "--email",
+        help="Tesla account email."
+    )
+    parser.add_argument(
+        "--password",
+        help="Tesla account password."
+    )
+    parser.add_argument(
+        "--vin",
+        help="VIN number of the car."
+    )
+    parser.add_argument(
+        "--name",
+        help="name of the car."
+    )
+    parser.add_argument(
+        "--accesstoken",
+        help="Access token to use instead of email/password"
+    )
+    parser.add_argument(
+        "--refreshtoken",
+        help="Token to refresh access token"
+    )
 
     return parser
 
@@ -483,6 +589,36 @@ def main():
     args = _get_arg_parser().parse_args()
 
     SETTINGS['DEBUG'] = args.debug
+
+    if args.email:
+        SETTINGS['tesla_email'] = args.email
+    else:
+        SETTINGS['tesla_email'] = os.environ.get('TESLA_EMAIL', '')
+
+    if args.password:
+        SETTINGS['tesla_password'] = args.password
+    else:
+        SETTINGS['tesla_password'] = os.environ.get('TESLA_PASSWORD', '')
+
+    if args.vin:
+        SETTINGS['tesla_vin'] = args.vin
+    else:
+        SETTINGS['tesla_vin'] = os.environ.get('TESLA_VIN', '')
+
+    if args.name:
+        SETTINGS['tesla_name'] = args.name
+    else:
+        SETTINGS['tesla_name'] = os.environ.get('TESLA_NAME', '')
+
+    if args.accesstoken:
+        SETTINGS['tesla_access_token'] = args.accesstoken
+    else:
+        SETTINGS['tesla_access_token'] = os.environ.get('TESLA_ACCESS_TOKEN', '')
+
+    if args.refreshtoken:
+        SETTINGS['tesla_refresh_token'] = args.refreshtoken
+    else:
+        SETTINGS['tesla_refresh_token'] = os.environ.get('TESLA_REFRESH_TOKEN', '')
 
     # We call this now so DEBUG will be set correctly.
     _load_tesla_api_json()
@@ -500,27 +636,9 @@ def main():
             '{}={}'.format(key, value) for key, value in kwargs.items()
         )
 
-    # Retrieve the setup variables, which is where the account credentials
-    # or bearer token, and the VIN are stored. Since teslausb_setup_variables.conf
-    # is actually a shell script, rather than a ConfigParser file, we have to
-    # parse it manually.
-    with open('/root/teslausb_setup_variables.conf', 'r') as conf_file:
-        conf_lines = [
-            line.strip()
-            for line in conf_file.read().split('\n')
-            if line.strip() and not line.strip().startswith('#')
-        ]
-    for line in conf_lines:
-        setting = line.split('=')
-        # Strip leading/trailing whitespace and the "export " part off of "export setting_name=value"
-        setting_name = setting[0].replace('export ', '').strip()
-        # Strip leading/trailing whitespace, " and ' surrounding bash script variable values
-        setting_value = setting[1].strip(" \"'")
-        SETTINGS[setting_name] = setting_value
-
     # We need to call this before calling any API function, because those need
-    # to know the Vehicle ID before they call _execute_request()
-    _get_vehicle_id()
+    # to know the ID before they call _execute_request()
+    _get_id()
 
     # Get the function by name from the globals() dict and call it with the
     # specified args.

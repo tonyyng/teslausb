@@ -3,7 +3,8 @@
 # Adapted from https://github.com/adafruit/Raspberry-Pi-Installer-Scripts/blob/master/read-only-fs.sh
 
 function log_progress () {
-  if typeset -f setup_progress > /dev/null; then
+  if declare -F setup_progress > /dev/null
+  then
     setup_progress "make-root-fs-readonly: $1"
   fi
   echo "make-root-fs-readonly: $1"
@@ -13,11 +14,22 @@ log_progress "start"
 
 function append_cmdline_txt_param() {
   local toAppend="$1"
-  sed -i "s/\'/ ${toAppend}/g" /boot/cmdline.txt >/dev/null
+  # Don't add the option if it is already added.
+  # If the command line gets too long the pi won't boot.
+  # Look for the option at the end ($) or in the middle
+  # of the command line and surrounded by space (\s).
+  if ! grep -P -q "\s${toAppend}(\$|\s)" /boot/cmdline.txt
+  then
+    sed -i "s/\'/ ${toAppend}/g" /boot/cmdline.txt >/dev/null
+  fi
 }
 
+log_progress "Disabling unnecessary service..."
+systemctl disable apt-daily.timer
+systemctl disable apt-daily-upgrade.timer
+
 log_progress "Removing unwanted packages..."
-apt-get remove -y --force-yes --purge triggerhappy logrotate dphys-swapfile
+apt-get remove -y --force-yes --purge triggerhappy logrotate dphys-swapfile bluez alsa-utils
 apt-get -y --force-yes autoremove --purge
 # Replace log management with busybox (use logread if needed)
 log_progress "Installing ntp and busybox-syslogd..."
@@ -29,6 +41,9 @@ log_progress "Configuring system..."
 append_cmdline_txt_param fastboot
 append_cmdline_txt_param noswap
 append_cmdline_txt_param ro
+
+# we're not using swap, so delete the swap file for some extra space
+rm -f /var/swap
 
 # Move fake-hwclock.data to /mutable directory so it can be updated
 if ! findmnt --mountpoint /mutable
@@ -48,6 +63,13 @@ then
     mv /etc/fake-hwclock.data /mutable/etc/fake-hwclock.data
     ln -s /mutable/etc/fake-hwclock.data /etc/fake-hwclock.data
 fi
+# By default fake-hwclock is run during early boot, before /mutable
+# has been mounted and so will fail. Delay running it until /mutable
+# has been mounted.
+if [ -e /lib/systemd/system/fake-hwclock.service ]
+then
+  sed -i 's/Before=.*/After=mutable.mount/' /lib/systemd/system/fake-hwclock.service
+fi
 
 # Create a configs directory for others to use
 if [ ! -e "/mutable/configs" ]
@@ -56,8 +78,16 @@ then
 fi
 
 # Move /var/spool to /tmp
-rm -rf /var/spool
-ln -s /tmp /var/spool
+if [ -L /var/spool ]
+then
+  log_progress "fixing /var/spool"
+  rm /var/spool
+  mkdir /var/spool
+  chmod 755 /var/spool
+  # a tmpfs fstab entry for /var/spool will be added below
+else
+  rm -rf /var/spool/*
+fi
 
 # Change spool permissions in var.conf (rondie/Margaret fix)
 sed -i "s/spool\s*0755/spool 1777/g" /usr/lib/tmpfiles.d/var.conf >/dev/null
@@ -95,6 +125,11 @@ fi
 if ! grep -w -q "/tmp" /etc/fstab
 then
   echo "tmpfs /tmp    tmpfs nodev,nosuid 0 0" >> /etc/fstab
+fi
+
+if ! grep -w -q "/var/spool" /etc/fstab
+then
+  echo "tmpfs /var/spool tmpfs nodev,nosuid 0 0" >> /etc/fstab
 fi
 
 log_progress "done"

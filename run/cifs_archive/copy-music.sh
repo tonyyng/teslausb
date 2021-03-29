@@ -1,75 +1,94 @@
 #!/bin/bash -eu
 
-log "Copying music from archive..."
-
-NUM_FILES_COPIED=0
-NUM_FILES_SKIPPED=0
-NUM_FILES_ERROR=0
 SRC="/mnt/musicarchive"
 DST="/mnt/music"
+LOG="/tmp/rsyncmusiclog.txt"
+
+# check that DST is the mounted disk image, not the mountpoint directory
+if ! findmnt --mountpoint $DST > /dev/null
+then
+  log "$DST not mounted, skipping music sync"
+  exit
+fi
 
 function connectionmonitor {
   while true
   do
-    for i in $(seq 1 10)
+    # shellcheck disable=SC2034
+    for i in {1..10}
     do
-      if timeout 3 /root/bin/archive-is-reachable.sh $ARCHIVE_HOST_NAME
+      if timeout 3 /root/bin/archive-is-reachable.sh "$ARCHIVE_SERVER"
       then
         # sleep and then continue outer loop
         sleep 5
         continue 2
       fi
     done
-    log "connection dead, killing archive-clips"
-    # The archive loop might be stuck on an unresponsive server, so kill it hard.
-    # (should be no worse than losing power in the middle of an operation)
-    kill -9 $1
+    log "connection dead, killing copy-music"
+    # Give rsync a chance to clean up before killing it hard.
+    killall rsync || true
+    sleep 2
+    killall -9 rsync || true
+    kill -9 "$1" || true
     return
   done
 }
 
-if ! findmnt --mountpoint $DST
-then
-  log "$DST not mounted, skipping"
-  exit
-fi
+function do_music_sync {
+  log "Syncing music from archive..."
 
-connectionmonitor $$ &
-
-while read file_name
-do
-  if [ ! -e "$DST/$file_name" ]
+  # return immediately if the archive mount can't be accessed
+  if ! timeout 5 stat "$SRC"
   then
-    dir=$(dirname "$file_name")
-    if ! mkdir -p "$DST/$dir"
-    then
-      log "couldn't make directory $DST/$dir"
-      NUM_FILES_ERROR=$((NUM_FILES_ERROR + 1))
-      continue
-    fi
-    if ! cp "$SRC/$file_name" "$DST/$dir/__tmp__"
-    then
-      log "Couldn't copy $SRC/$file_name"
-      NUM_FILES_ERROR=$((NUM_FILES_ERROR + 1))
-      continue
-    fi
-    if ! mv "$DST/$dir/__tmp__" "$DST/$file_name"
-    then
-      log "Couldn't move to $DST/$file_name"
-      NUM_FILES_ERROR=$((NUM_FILES_ERROR + 1))
-      continue
-    fi
-    NUM_FILES_COPIED=$((NUM_FILES_COPIED + 1))
-  else
-    NUM_FILES_SKIPPED=$((NUM_FILES_SKIPPED + 1))
+    log "Error: $SRC is not accessible"
+    return
   fi
-done <<< "$(cd "$SRC"; find * -type f)"
 
-kill %1
+  # check that SRC is the mounted cifs archive and not the empty mountpoint
+  # directory, since the latter would cause all music to be deleted from DST
+  if ! findmnt --mountpoint $SRC > /dev/null
+  then
+    log "Error: $SRC not mounted"
+    return
+  fi
 
-log "Copied $NUM_FILES_COPIED music file(s), skipped $NUM_FILES_SKIPPED previously-copied files, encountered $NUM_FILES_ERROR errors."
+  connectionmonitor $$ &
 
-if [ $NUM_FILES_COPIED -gt 0 ]
+  if ! rsync -rum --no-human-readable --exclude=.fseventsd/*** --exclude=*.DS_Store --exclude=.metadata_never_index \
+                --exclude="System Volume Information/***" \
+                --delete --modify-window=2 --info=stats2 "$SRC/" "$DST" &> "$LOG"
+  then
+    log "rsync failed with error $?"
+  fi
+
+  # Stop the connection monitor.
+  kill %1 || true
+
+  # remove empty directories
+  find $DST -depth -type d -empty -delete || true
+
+  # parse log for relevant info
+  declare -i NUM_FILES_COPIED
+  NUM_FILES_COPIED=$(($(sed -n -e 's/\(^Number of regular files transferred: \)\([[:digit:]]\+\).*/\2/p' "$LOG")))
+  declare -i NUM_FILES_DELETED
+  NUM_FILES_DELETED=$(($(sed -n -e 's/\(^Number of deleted files: [[:digit:]]\+ (reg: \)\([[:digit:]]\+\)*.*/\2/p' "$LOG")))
+  declare -i TOTAL_FILES
+  TOTAL_FILES=$(sed -n -e 's/\(^Number of files: [[:digit:]]\+ (reg: \)\([[:digit:]]\+\)*.*/\2/p' "$LOG")
+  declare -i NUM_FILES_ERROR
+  NUM_FILES_ERROR=$(($(grep -c "failed to open" $LOG || true)))
+
+  declare -i NUM_FILES_SKIPPED=$((TOTAL_FILES-NUM_FILES_COPIED))
+  NUM_FILES_COPIED=$((NUM_FILES_COPIED-NUM_FILES_ERROR))
+
+  log "Copied $NUM_FILES_COPIED music file(s), deleted $NUM_FILES_DELETED, skipped $NUM_FILES_SKIPPED previously-copied files, and encountered $NUM_FILES_ERROR errors."
+
+  if [ $NUM_FILES_COPIED -ne 0 ] || [ $NUM_FILES_DELETED -ne 0 ] || [ $NUM_FILES_ERROR -ne 0 ]
+  then
+    /root/bin/send-push-message "$TESLAUSB_HOSTNAME:" "Copied $NUM_FILES_COPIED music file(s), deleted $NUM_FILES_DELETED, skipped $NUM_FILES_SKIPPED previously-copied files, and encountered $NUM_FILES_ERROR errors."
+  fi
+}
+
+if ! do_music_sync
 then
-  /root/bin/send-push-message "TeslaUSB:" "Copied $NUM_FILES_COPIED music file(s), skipped $NUM_FILES_SKIPPED previously-copied files, encountered $NUM_FILES_ERROR errors."
+  log "Error while syncing music"
 fi
